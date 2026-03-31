@@ -354,16 +354,30 @@ friends.post('/api/push', async (c) => {
       return c.json({ success: false, error: 'to and messages are required' }, 400);
     }
 
+    const db = c.env.DB;
     const { LineClient } = await import('@line-crm/line-sdk');
-    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
 
+    // friendが存在すればそのline_account_idからアクセストークンを解決
+    const { getFriendByLineUserId } = await import('@line-crm/db');
+    const friend = await getFriendByLineUserId(db, body.to);
+
+    let accessToken = c.env.LINE_CHANNEL_ACCESS_TOKEN;
+    if (friend && (friend as unknown as Record<string, unknown>).line_account_id) {
+      const { getLineAccountById } = await import('@line-crm/db');
+      const account = await getLineAccountById(db, (friend as unknown as Record<string, unknown>).line_account_id as string);
+      if (account) accessToken = account.channel_access_token;
+    } else {
+      // friendが見つからない場合もline_accountsから最初のアクティブアカウントで試行
+      const acct = await db.prepare('SELECT channel_access_token FROM line_accounts WHERE is_active = 1 LIMIT 1')
+        .first<{ channel_access_token: string }>();
+      if (acct) accessToken = acct.channel_access_token;
+    }
+
+    const lineClient = new LineClient(accessToken);
     const builtMessages = body.messages.map((m) => buildMessage(m.type, m.type === 'text' ? (m.text ?? '') : JSON.stringify(m.contents ?? {})));
     await lineClient.pushMessage(body.to, builtMessages);
 
     // ログ記録（friendが存在すれば）
-    const db = c.env.DB;
-    const { getFriendByLineUserId } = await import('@line-crm/db');
-    const friend = await getFriendByLineUserId(db, body.to);
     if (friend) {
       const logId = crypto.randomUUID();
       await db
@@ -377,8 +391,9 @@ friends.post('/api/push', async (c) => {
 
     return c.json({ success: true });
   } catch (err) {
-    console.error('POST /api/push error:', err);
-    return c.json({ success: false, error: 'Internal server error' }, 500);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error('POST /api/push error:', errMsg);
+    return c.json({ success: false, error: errMsg }, 500);
   }
 });
 
