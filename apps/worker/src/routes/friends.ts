@@ -342,4 +342,44 @@ friends.post('/api/friends/:id/messages', async (c) => {
   }
 });
 
+// POST /api/push - send message by LINE user ID (for external CRM integration)
+friends.post('/api/push', async (c) => {
+  try {
+    const body = await c.req.json<{
+      to: string;
+      messages: Array<{ type: string; text?: string; altText?: string; contents?: unknown }>;
+    }>();
+
+    if (!body.to || !body.messages?.length) {
+      return c.json({ success: false, error: 'to and messages are required' }, 400);
+    }
+
+    const { LineClient } = await import('@line-crm/line-sdk');
+    const lineClient = new LineClient(c.env.LINE_CHANNEL_ACCESS_TOKEN);
+
+    const builtMessages = body.messages.map((m) => buildMessage(m.type, m.type === 'text' ? (m.text ?? '') : JSON.stringify(m.contents ?? {})));
+    await lineClient.pushMessage(body.to, builtMessages);
+
+    // ログ記録（friendが存在すれば）
+    const db = c.env.DB;
+    const { getFriendByLineUserId } = await import('@line-crm/db');
+    const friend = await getFriendByLineUserId(db, body.to);
+    if (friend) {
+      const logId = crypto.randomUUID();
+      await db
+        .prepare(
+          `INSERT INTO messages_log (id, friend_id, direction, message_type, content, created_at)
+           VALUES (?, ?, 'outgoing', ?, ?, ?)`,
+        )
+        .bind(logId, friend.id, body.messages[0].type, body.messages[0].text ?? '', jstNow())
+        .run();
+    }
+
+    return c.json({ success: true });
+  } catch (err) {
+    console.error('POST /api/push error:', err);
+    return c.json({ success: false, error: 'Internal server error' }, 500);
+  }
+});
+
 export { friends };
